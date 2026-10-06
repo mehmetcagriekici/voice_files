@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read text and Markdown files aloud from the terminal, offline.
 
-Speech comes from DECtalk ("Perfect Paul", the Hawking voice) when it is
-installed (see install_dectalk.sh), otherwise from eSpeak NG.
+Speech comes from Piper, a natural-sounding neural voice. DECtalk and
+eSpeak NG are available as alternative engines.
 
 Markdown is detected (by extension, or by content for other files) and reduced
 to plain prose first: code blocks, images, link URLs and formatting are dropped.
@@ -23,12 +23,14 @@ import sys
 import tempfile
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
 TEXT_SUFFIXES = {".txt", ".text"}
 
+PIPER_VOICES = Path(os.environ.get("PIPER_VOICES", Path.home() / ".local/share/piper-voices"))
 DECTALK_HOME = Path(os.environ.get("DECTALK_HOME", Path.home() / ".local/share/dectalk"))
 
 
@@ -280,6 +282,40 @@ class Espeak:
         return found
 
 
+class Piper:
+    """Piper neural TTS; voice models are downloaded on first use."""
+
+    DEFAULT_VOICE = "en_US-lessac-medium"
+
+    def __init__(self, voice: str, rate: int, volume: int):
+        from piper import PiperVoice, SynthesisConfig
+
+        model = PIPER_VOICES / f"{voice}.onnx"
+        if not model.exists():
+            from piper.download_voices import download_voice
+
+            print(f"Downloading Piper voice '{voice}' (about 60-120 MB, one time only)...")
+            PIPER_VOICES.mkdir(parents=True, exist_ok=True)
+            try:
+                download_voice(voice, PIPER_VOICES)
+            except Exception as e:
+                sys.exit(f"Error: could not download Piper voice '{voice}': {e}")
+        self.voice = PiperVoice.load(model)
+        self.sample_rate = self.voice.config.sample_rate
+        # length_scale stretches speech; 175 wpm is Piper's natural pace.
+        # Volume stays below 1.0 because Piper normalises audio to full scale.
+        self.config = SynthesisConfig(length_scale=175 / rate, volume=0.9 * volume / 100)
+
+    def synth(self, text: str) -> tuple[bytes, list[int]]:
+        """Return 16-bit mono PCM; word positions are not reported."""
+        pcm = b"".join(c.audio_int16_bytes for c in self.voice.synthesize(text, self.config))
+        return pcm, []
+
+    @staticmethod
+    def installed_voices() -> list[str]:
+        return sorted(m.stem for m in PIPER_VOICES.glob("*.onnx"))
+
+
 class DECtalk:
     """DECtalk through its `say` program, which writes raw PCM to stdout."""
 
@@ -431,9 +467,24 @@ def _status(index: int, total: int, text: str, paused: bool):
 
 def read_aloud(engine, player: Player, chunks: list[str], keys: Keys | None) -> bool:
     """Speak chunks in order. Returns False if the user quit."""
+    # One worker does all synthesis, rendering the next paragraph while
+    # the current one plays so there is no gap between them.
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return _read_chunks(engine, player, chunks, keys, pool)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _read_chunks(engine, player, chunks, keys, pool) -> bool:
+    ahead = None  # (index, future) of the prefetched paragraph
     i = 0
     while i < len(chunks):
-        pcm, words = engine.synth(chunks[i])
+        if ahead and ahead[0] == i:
+            pcm, words = ahead[1].result()
+        else:
+            pcm, words = pool.submit(engine.synth, chunks[i]).result()
+        ahead = (i + 1, pool.submit(engine.synth, chunks[i + 1])) if i + 1 < len(chunks) else None
         paused = False
         resume_at = 0
         if keys:
@@ -483,16 +534,17 @@ def parse_args(argv=None):
         epilog="While reading: space = pause/resume, ←/→ = previous/next paragraph, q = quit.",
     )
     p.add_argument("files", nargs="*", type=Path, help="text or Markdown files to read")
-    p.add_argument("-e", "--engine", choices=["auto", "dectalk", "espeak"], default="auto",
-                   help="speech engine; auto uses DECtalk when installed (default: auto)")
+    p.add_argument("-e", "--engine", choices=["piper", "dectalk", "espeak"], default="piper",
+                   help="speech engine (default: piper)")
     p.add_argument("-v", "--voice",
-                   help="DECtalk: paul, harry, frank, ... (default: paul); "
-                        "eSpeak: language+variant, e.g. en-us+klatt3 (default)")
+                   help=f"Piper: e.g. en_US-ryan-high (default: {Piper.DEFAULT_VOICE}); "
+                        "DECtalk: paul, harry, ... (default: paul); "
+                        "eSpeak: e.g. en-us+klatt3 (default)")
     p.add_argument("-s", "--speed", type=int, default=175, help="words per minute (default: 175)")
     p.add_argument("-p", "--pitch", type=int,
-                   help="DECtalk: average pitch in Hz, 50-350 (Paul: 122); eSpeak: 0-99 (default: 40)")
+                   help="not for Piper. DECtalk: average pitch in Hz, 50-350 (Paul: 122); eSpeak: 0-99 (default: 40)")
     p.add_argument("--range", type=int, dest="pitch_range",
-                   help="pitch variation, lower = more monotone. DECtalk: 0-250 %% (default: 100); "
+                   help="not for Piper. Pitch variation, lower = more monotone. DECtalk: 0-250 %% (default: 100); "
                         "eSpeak: 0-99 (default: 50)")
     p.add_argument("-g", "--gap", type=int, default=0,
                    help="eSpeak only: extra pause between words, in 10 ms units (default: 0)")
@@ -508,8 +560,10 @@ def parse_args(argv=None):
 
     if not args.list_voices and not args.files:
         p.error("at least one file is required")
-    if args.engine == "auto":
-        args.engine = "dectalk" if dectalk_available() else "espeak"
+    if args.engine == "piper":
+        for name, value in (("--pitch", args.pitch), ("--range", args.pitch_range), ("--gap", args.gap or None)):
+            if value is not None:
+                p.error(f"{name} is not supported by Piper (use -e dectalk or -e espeak)")
     if args.engine == "dectalk":
         limits = {"--speed": (75, 600), "--pitch": (50, 350), "--range": (0, 250)}
     else:
@@ -526,6 +580,8 @@ def parse_args(argv=None):
 
 
 def make_engine(args):
+    if args.engine == "piper":
+        return Piper(args.voice or Piper.DEFAULT_VOICE, args.speed, args.volume)
     if args.engine == "dectalk":
         return DECtalk(args.voice or "paul", args.speed, args.pitch, args.pitch_range, args.volume)
     engine = Espeak()
@@ -539,8 +595,14 @@ def make_engine(args):
 
 
 def list_voices():
+    print(f"Piper voices installed in {PIPER_VOICES} (default engine):")
+    for name in Piper.installed_voices():
+        print(f"  {name}")
+    print("  Others download on first use with -v, e.g. -v en_GB-alan-medium. Full list:")
+    print("  https://huggingface.co/rhasspy/piper-voices/tree/main")
+    print()
     if dectalk_available():
-        print("DECtalk voices (default engine):")
+        print("DECtalk voices, use with --engine dectalk:")
         for name, desc in DECtalk.VOICES.items():
             print(f"  {name:<12} {desc}")
         print()
