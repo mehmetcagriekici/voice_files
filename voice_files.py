@@ -327,7 +327,7 @@ class Espeak:
 class Piper:
     """Piper neural TTS; voice models are downloaded on first use."""
 
-    DEFAULT_VOICE = "en_GB-alan-medium"
+    DEFAULT_VOICE = "en_US-danny-low"
 
     def __init__(self, voice: str, rate: int, volume: int):
         from piper import PiperVoice, SynthesisConfig
@@ -640,7 +640,7 @@ def list_voices():
     print(f"Piper voices installed in {PIPER_VOICES} (default engine):")
     for name in Piper.installed_voices():
         print(f"  {name}")
-    print("  Others download on first use with -v, e.g. -v en_US-joe-medium. Full list:")
+    print("  Others download on first use with -v, e.g. -v en_GB-alan-medium. Full list:")
     print("  https://huggingface.co/rhasspy/piper-voices/tree/main")
     print()
     if dectalk_available():

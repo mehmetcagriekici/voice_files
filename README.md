@@ -16,7 +16,7 @@ Needs PipeWire (`pw-play`) or ALSA (`aplay`) for playback.
 pipx install .          # or: pip install -e .
 ```
 
-The default voice (`en_GB-alan-medium`, about 60 MB) is downloaded to
+The default voice (`en_US-danny-low`, about 60 MB) is downloaded to
 `~/.local/share/piper-voices` the first time you run the app.
 
 Optional engines:
