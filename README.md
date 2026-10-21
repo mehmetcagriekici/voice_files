@@ -16,7 +16,7 @@ Needs PipeWire (`pw-play`) or ALSA (`aplay`) for playback.
 pipx install .          # or: pip install -e .
 ```
 
-The default voice (`en_US-lessac-medium`, about 60 MB) is downloaded to
+The default voice (`en_GB-alan-medium`, about 60 MB) is downloaded to
 `~/.local/share/piper-voices` the first time you run the app.
 
 Optional engines:
@@ -35,6 +35,8 @@ descends from leaked DEC source, so its licence status is unclear.
 ```sh
 voice-files notes.md                  # read aloud
 voice-files a.txt b.md                # several files in order
+voice-files https://github.com/pquerna/otp/blob/master/README.md   # a file on GitHub
+voice-files https://github.com/pquerna/otp    # a repository's README
 voice-files notes.md -s 220           # speed in words per minute
 voice-files notes.md -v en_US-ryan-high   # another Piper voice (downloads once)
 voice-files notes.md -e dectalk -v paul   # DECtalk's Perfect Paul (Hawking voice)
@@ -43,6 +45,11 @@ voice-files notes.md --print          # show the text that would be spoken
 voice-files notes.md -t               # write notes.txt next to it
 voice-files notes.md -o notes.wav     # save to a WAV file
 ```
+
+Arguments starting with `http://` or `https://` are downloaded first (the
+only time the app needs the network apart from voice downloads). GitHub file
+links (`/blob/…`) are fetched as raw text, and a bare repository link reads its
+README. With `-t`, text from a URL is written to the current directory.
 
 While reading:
 

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Read text and Markdown files aloud from the terminal, offline.
 
+Files can also be web URLs; GitHub file and repository links are fetched as
+raw text, so https://github.com/owner/repo/blob/main/README.md works.
+
 Speech comes from Piper, a natural-sounding neural voice. DECtalk and
 eSpeak NG are available as alternative engines.
 
@@ -22,6 +25,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
@@ -133,8 +139,44 @@ def is_markdown(path: Path, text: str) -> bool:
     return len(_MD_HINTS.findall(text)) >= 3
 
 
-def load_text(path: Path) -> str:
-    raw = path.read_text(encoding="utf-8")
+def is_url(source: str) -> bool:
+    return source.startswith(("http://", "https://"))
+
+
+def source_path(source: str) -> Path:
+    """The local path, or for a URL the path part (used to detect Markdown)."""
+    return Path(urllib.parse.urlparse(source).path) if is_url(source) else Path(source)
+
+
+def raw_url(url: str) -> str:
+    """Rewrite GitHub page links to the URL of the raw file."""
+    parts = urllib.parse.urlparse(url)
+    if parts.netloc.lower() not in ("github.com", "www.github.com"):
+        return url
+    segments = [s for s in parts.path.split("/") if s]
+    if len(segments) == 2:  # repository page: its README
+        owner, repo = segments[0], segments[1].removesuffix(".git")
+        return f"https://api.github.com/repos/{owner}/{repo}/readme"
+    if len(segments) >= 5 and segments[2] in ("blob", "raw"):
+        owner, repo, _, *rest = segments
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/{'/'.join(rest)}"
+    return url
+
+
+def fetch(url: str) -> str:
+    request = urllib.request.Request(raw_url(url), headers={
+        "User-Agent": "voice-files",
+        "Accept": "application/vnd.github.raw, text/plain;q=0.9, */*;q=0.8",
+    })
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read().decode(response.headers.get_content_charset() or "utf-8")
+
+
+def load_text(source: str) -> str:
+    path = source_path(source)
+    raw = fetch(source) if is_url(source) else path.read_text(encoding="utf-8")
+    if is_url(source) and raw_url(source).endswith("/readme"):
+        path = Path("README.md")  # GitHub repository READMEs are nearly always Markdown
     return markdown_to_text(raw) if is_markdown(path, raw) else plain_to_text(raw)
 
 
@@ -285,7 +327,7 @@ class Espeak:
 class Piper:
     """Piper neural TTS; voice models are downloaded on first use."""
 
-    DEFAULT_VOICE = "en_US-lessac-medium"
+    DEFAULT_VOICE = "en_GB-alan-medium"
 
     def __init__(self, voice: str, rate: int, volume: int):
         from piper import PiperVoice, SynthesisConfig
@@ -533,7 +575,7 @@ def parse_args(argv=None):
         description="Read text and Markdown files aloud (Markdown is spoken as plain text).",
         epilog="While reading: space = pause/resume, ←/→ = previous/next paragraph, q = quit.",
     )
-    p.add_argument("files", nargs="*", type=Path, help="text or Markdown files to read")
+    p.add_argument("files", nargs="*", help="text or Markdown files or URLs to read (GitHub links work)")
     p.add_argument("-e", "--engine", choices=["piper", "dectalk", "espeak"], default="piper",
                    help="speech engine (default: piper)")
     p.add_argument("-v", "--voice",
@@ -598,7 +640,7 @@ def list_voices():
     print(f"Piper voices installed in {PIPER_VOICES} (default engine):")
     for name in Piper.installed_voices():
         print(f"  {name}")
-    print("  Others download on first use with -v, e.g. -v en_GB-alan-medium. Full list:")
+    print("  Others download on first use with -v, e.g. -v en_US-joe-medium. Full list:")
     print("  https://huggingface.co/rhasspy/piper-voices/tree/main")
     print()
     if dectalk_available():
@@ -616,13 +658,15 @@ def list_voices():
 
 def to_txt(texts, force: bool) -> int:
     status = 0
-    for path, text in texts:
-        target = path.with_suffix(".txt")
-        if target.resolve() == path.resolve():
+    for source, text in texts:
+        path = source_path(source)
+        # files from the web are written to the current directory
+        target = Path(path.name or "index").with_suffix(".txt") if is_url(source) else path.with_suffix(".txt")
+        if not is_url(source) and target.resolve() == path.resolve():
             print(f"Skipping '{path}': it is already a .txt file.", file=sys.stderr)
             continue
         if target.exists() and not force:
-            print(f"Skipping '{path}': '{target}' exists (use --force to overwrite).", file=sys.stderr)
+            print(f"Skipping '{source}': '{target}' exists (use --force to overwrite).", file=sys.stderr)
             status = 1
             continue
         target.write_text(text + "\n", encoding="utf-8")
@@ -649,6 +693,12 @@ def main(argv=None) -> int:
             continue
         except UnicodeDecodeError:
             print(f"Skipping '{path}': not a UTF-8 text file.", file=sys.stderr)
+            continue
+        except urllib.error.HTTPError as e:
+            print(f"Error: could not fetch '{path}': HTTP {e.code} {e.reason}.", file=sys.stderr)
+            continue
+        except (urllib.error.URLError, TimeoutError) as e:
+            print(f"Error: could not fetch '{path}': {getattr(e, 'reason', e)}.", file=sys.stderr)
             continue
         if not text:
             print(f"Skipping '{path}': nothing to read.", file=sys.stderr)
