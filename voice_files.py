@@ -172,6 +172,21 @@ def fetch(url: str) -> str:
         return response.read().decode(response.headers.get_content_charset() or "utf-8")
 
 
+def markdown_links(repo_url: str) -> list[str]:
+    """Links to the Markdown files at the top of a GitHub repository."""
+    import json
+
+    contents = raw_url(repo_url).removesuffix("/readme") + "/contents/"
+    request = urllib.request.Request(contents, headers={"User-Agent": "voice-files"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            entries = json.load(response)
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return []
+    return [e["html_url"] for e in entries
+            if e.get("type") == "file" and Path(e["name"]).suffix.lower() in MARKDOWN_SUFFIXES]
+
+
 def load_text(source: str) -> str:
     path = source_path(source)
     raw = fetch(source) if is_url(source) else path.read_text(encoding="utf-8")
@@ -695,6 +710,15 @@ def main(argv=None) -> int:
             print(f"Skipping '{path}': not a UTF-8 text file.", file=sys.stderr)
             continue
         except urllib.error.HTTPError as e:
+            if e.code == 404 and raw_url(path).endswith("/readme"):
+                links = markdown_links(path)
+                if links:
+                    print(f"Error: '{path}' has no README. Markdown files in it:",
+                          *(f"  {link}" for link in links), sep="\n", file=sys.stderr)
+                else:
+                    print(f"Error: no README found at '{path}' (the repository may be private or not exist).",
+                          file=sys.stderr)
+                continue
             print(f"Error: could not fetch '{path}': HTTP {e.code} {e.reason}.", file=sys.stderr)
             continue
         except (urllib.error.URLError, TimeoutError) as e:
